@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-**为 DeepSeek Harness 增加中文语音对话能力。** `dsh-chinese-talk-plus` 是一个可通过 DeepSeek Harness 官方插件命令安装的 Web 插件 Bundle，在 Harness 界面右侧加入语音面板：浏览器录音、MP3 本地保存、FunASR 转成中文文字并填入输入框，同时把助手的最终回答归档成文本并朗读出来 —— 优先 Edge TTS，Windows 下失败时回退到本机 SAPI 离线语音。
+**为 DeepSeek Harness 增加中文语音对话能力。** `dsh-chinese-talk-plus` 是一个可通过 DeepSeek Harness 官方插件命令安装的 Web 插件 Bundle，在 Harness 界面右侧加入语音面板：浏览器录音、MP3 本地保存、FunASR 转成中文文字并填入输入框，同时把助手的最终回答归档成文本并朗读出来 —— 优先 Edge TTS，Windows 下失败时回退到本机 SAPI 离线语音。它还支持用一段短参考音频零样本复刻音色（基于 Qwen3-TTS），并完全在本机用复刻音色朗读回答。
 
 项目由两部分组成：
 
@@ -20,13 +20,15 @@ Bundle 通过官方 `dsh plugin` 命令以 profile overlay 方式安装，不会
 │                                                          │
 │  录音 ──► /api/record ──► MP3 本地保存                    │
 │  /api/stt 识别 ──► 中文文本 ──► 输入框                     │
+│  上传 WAV ──► 复刻音色 ──► 复刻音色朗读                    │
 │  最终回答 ──► 归档 .txt + 朗读                            │
 └──────────────────────────┬───────────────────────────────┘
                            │ 本机 HTTP（仅 localhost，CORS 受限）
 ┌──────────────────────────▼───────────────────────────────┐
 │  本地 Python 桥 —— record-sink（127.0.0.1:8766）           │
 │  ffmpeg · FunASR Paraformer-large（中文 16k）·            │
-│  Edge TTS → ffplay，Windows SAPI（speak.ps1）兜底         │
+│  Qwen3-TTS 1.7B（音色复刻）· Edge TTS → ffplay，         │
+│  Windows SAPI（speak.ps1）兜底                            │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -37,6 +39,7 @@ Bundle 通过官方 `dsh plugin` 命令以 profile overlay 方式安装，不会
 - **文字落到正确的位置**：识别文本追加到你最后点过的输入框（任意 `input`/`textarea`，如对话输入框或提问卡片），否则回退到当前会话的主输入框草稿。文本**不会自动发送** —— 确认后再按回车。
 - **回答归档**：一个回合结束后，助手最终回答会写成 UTF-8 `.txt`（同样以结束时刻命名）存入回答目录，形成轻量、可检索的问答记录。
 - **回答朗读**：每次最终回答会用 Edge TTS（默认音色 `zh-CN-XiaoxiaoNeural`）合成并在本机通过 ffplay 播放；Edge TTS 失败时回退到 Windows SAPI 离线语音（优先 `Huihui`，其次 `Zira`）。朗读默认开启，可在面板开关，关闭页面或开始说话时会自动停止。
+- **音色复刻与复刻朗读**：上传一段短 WAV 参考音频，桥会用 Qwen3-TTS（`Qwen3-TTS-12Hz-1.7B-Base`，Apache-2.0，在本机 GPU/CPU 上运行）零样本复刻其音色。可试听合成结果、重新生成并命名保存。在面板下拉栏里选择 Edge TTS 或任意已保存的复刻音色 —— 一次只启用一种音色。复刻音色在本机合成期间，面板会提示「语音正在合成请等待」。
 - **随时可用**：面板挂在整壳层，助手思考/回答进行中也可以录音、填字。面板内置活动日志（最近约 20 条），不开控制台也能看到每一步结果。
 - **不改 Harness 代码**：安装就是标准的 `dsh plugin --profile web add ...`，卸载即全部移除。
 
@@ -51,6 +54,8 @@ Bundle 通过官方 `dsh plugin` 命令以 profile overlay 方式安装，不会
 | ffmpeg / ffplay | 加入 `PATH`，或设置 `FFMPEG_BIN` / `FFPLAY_BIN`；`ffplay` 负责播放语音 |
 | 浏览器 | 支持 `MediaRecorder` 且允许麦克风的现代浏览器 |
 | 操作系统 | 桥支持 Windows / Linux / macOS；SAPI **离线**兜底仅限 Windows |
+| GPU（可选） | 建议用约 4GB 显存的 CUDA GPU 加速音色复刻；CPU 也能跑，但明显更慢 |
+| qwen-tts / soundfile | 音色复刻所需的 Python 依赖，随桥依赖一并安装 |
 
 Bundle 通过官方 profile overlay 机制（`cordis.patch.yml`）在 Web profile 中新增独立的 `chinese-talk-plus` 条目，不修改 DeepSeek Harness 安装。
 
@@ -68,7 +73,7 @@ dsh plugin --profile web add .
 ### 从 GitHub Release 安装
 
 ```powershell
-dsh plugin --profile web add github:5527sy/dsh-chinese-talk-plus#v0.2.0
+dsh plugin --profile web add github:5527sy/dsh-chinese-talk-plus#v0.3.0
 ```
 
 Git 依赖在安装时会执行本包的 `prepare` 构建脚本。pnpm 10+ 可能要求你在 profile 的 `pnpm-workspace.yaml` 中允许本包执行构建。如果不希望在安装阶段构建，请改用下面的 tarball 方式。
@@ -78,8 +83,8 @@ Git 依赖在安装时会执行本包的 `prepare` 构建脚本。pnpm 10+ 可�
 ```powershell
 pnpm install
 pnpm run check
-pnpm pack                # 生成 dsh-chinese-talk-plus-0.2.0.tgz
-dsh plugin --profile web add .\dsh-chinese-talk-plus-0.2.0.tgz
+pnpm pack                # 生成 dsh-chinese-talk-plus-0.3.0.tgz
+dsh plugin --profile web add .\dsh-chinese-talk-plus-0.3.0.tgz
 ```
 
 ### 检查、重启、卸载
@@ -148,6 +153,7 @@ dsh-chinese-talk-plus-bridge
 注意事项：
 
 - 首次识别会从 ModelScope 懒加载 FunASR Paraformer-large 模型。想避免联网下载，可放置本地模型并用 `FUNASR_DIR` 指向它（桥也会探测 `<启动目录>/models/funasr/...`）。
+- 首次音色复刻会懒加载 Qwen3-TTS 模型。可放置本地模型并用 `QWEN_TTS_DIR` 指向它（桥默认探测 `<启动目录>/models/qwen3-tts/Qwen3-TTS-12Hz-1.7B-Base`）；建议用 CUDA GPU 加速。
 - 请把 `ffmpeg`、`ffplay` 加入 `PATH`，或配置 `FFMPEG_BIN` 与 `FFPLAY_BIN`。
 - 用 `http://127.0.0.1:8766/api/health` 确认桥已就绪 —— 它会报告状态、输出目录、ffmpeg、STT 是否就绪以及朗读链路（Edge TTS / ffplay / SAPI）。
 
@@ -175,6 +181,7 @@ dsh-chinese-talk-plus-bridge
 | `DSH_TTS_VOICE` | Edge TTS 音色 | `zh-CN-XiaoxiaoNeural` |
 | `DSH_SPEAK_VOICE` | Windows SAPI 首选音色名关键字 | 优先 `Huihui`，其次 `Zira` |
 | `DSH_BRIDGE_ORIGINS` | 允许调用桥的浏览器 Origin，逗号分隔 | Harness 本机 3080 / 3081 端口 |
+| `QWEN_TTS_DIR` | Qwen3-TTS 模型的本地目录（或 HuggingFace 模型 ID） | `<桥启动目录>/models/qwen3-tts/Qwen3-TTS-12Hz-1.7B-Base`，否则用 HF ID |
 
 通过仓库根目录的 `bridge/start.ps1` 或 `bridge/start.sh` 启动时，工作目录即仓库，因此默认录音落在 `<仓库>/vocal/master`、回答落在 `<仓库>/vocal/answer`（`vocal/` 已被 git 忽略）。
 
@@ -185,22 +192,29 @@ dsh-chinese-talk-plus-bridge
 | `s2s.record.base` | 桥的基地址，如 `http://127.0.0.1:8766` |
 | `s2s.record.panel` | 面板是否折叠（`1` 为折叠） |
 | `s2s.voice.read` | 是否开启朗读（`0` 关闭） |
+| `s2s.voice.current` | 当前朗读音色：`edge`（默认）或 `clone:<voice_id>` |
 
 ### 隐私说明
 
-桥默认只监听 `127.0.0.1`，CORS 默认只允许 Harness 本机端口调用。录音与回答均保存在本机。仅两处会访问网络：首次从 ModelScope 下载 FunASR 模型，以及 Edge TTS 把回答文本发送到微软 Edge TTS 服务合成语音。如需完全离线，可在 Windows 使用 SAPI 兜底，或改用本地 TTS。
+桥默认只监听 `127.0.0.1`，CORS 默认只允许 Harness 本机端口调用。录音与回答均保存在本机。会访问网络的场景：首次从 ModelScope 下载 FunASR 模型、Edge TTS 把回答文本发送到微软 Edge TTS 服务合成语音，以及（若模型尚未本地化）首次复刻时从 HuggingFace 下载 Qwen3-TTS 权重。音色复刻本身完全离线运行：参考音频与复刻音色保存在 `voices/cloned/`（已被 git 忽略），不会上传。如需避免 Edge TTS 联网，可在 Windows 使用 SAPI 兜底，或改用本地 TTS。
 
 ## 桥 HTTP API
 
 | 端点 | 用途 |
 |---|---|
-| `GET /api/health` | 状态：输出目录、ffmpeg、STT 冷/热、朗读链路 |
+| `GET /api/health` | 状态：输出目录、ffmpeg、STT 冷/热、朗读链路、复刻引擎状态 |
 | `POST /api/record` | 音频 → 本地保存 MP3（文件名=结束时刻）；`X-Record-Ms` 头携带时长 |
 | `POST /api/stt` | 音频 → `{ ok, text, language: "zh", seconds }`（FunASR，模型懒加载） |
 | `POST /api/answer` | `{ text }` → 最终回答归档为 `.txt` |
-| `POST /api/speak` | `{ text }` → 排队朗读（Edge TTS，SAPI 兜底） |
+| `POST /api/speak` | `{ text, voice }` → 排队朗读；`voice` 为 `edge`（默认）或 `clone:<voice_id>` |
 | `POST /api/speech/stop` | 停止当前朗读并清空队列 |
-| `GET /api/speech/status` | 朗读状态、队列长度、最近错误 |
+| `GET /api/speech/status` | 朗读状态、队列长度、阶段（`idle`/`synthesizing`/`speaking`）、最近错误 |
+| `POST /api/voice/clone` | 上传参考音频 → `{ voice_id, ref_text }`；可用 `X-Ref-Text` 头提供参考文本（否则由 FunASR 转写） |
+| `POST /api/voice/synthesize` | `{ voice_id, text, language }` → `{ ok, audio_url, seconds }` 试听片段 |
+| `GET /api/voice/audio/{token}` | 提供合成好的试听 WAV |
+| `POST /api/voice/save` | `{ voice_id, name }` → 把音色持久化到 `voices/cloned/<id>/` |
+| `GET /api/voices` | 列出已保存的复刻音色 |
+| `DELETE /api/voice/{voice_id}` | 删除已保存的复刻音色 |
 
 ## 常见问题
 
@@ -212,6 +226,7 @@ dsh-chinese-talk-plus-bridge
 | 朗读没有声音 | `ffplay` 缺失、Edge TTS 连不上、系统音量；Windows 下 SAPI 兜底需要安装含 `Huihui`/`Zira` 的语音。 |
 | 含代码/表情的回答朗读异常 | 朗读前会清洗文本：去 emoji、代码块替换为「（代码省略）」、URL 替换为「链接」。 |
 | 识别后没有填入文字 | 先点一下目标输入框（文本填入最近聚焦的输入框）；确认已打开会话，否则走主输入框回退。 |
+| 音色复刻失败或非常慢 | 复刻需要 Qwen3-TTS 模型：把模型放到 `models/qwen3-tts/...` 或设置 `QWEN_TTS_DIR`；建议用 CUDA GPU（约 4GB 显存），CPU 也能跑但明显更慢。 |
 
 ## 开发与检查
 
@@ -225,7 +240,7 @@ pnpm run check
 目录结构：
 
 - `dsh-plugin/src/` —— 插件源码：`client/` 挂载语音面板（`VoiceSidebar.tsx`）并监听会话事件；Node 半侧（`index.ts`）刻意留空，功能全部在 Web 端。
-- `bridge/` —— Python 桥（`record_sink.py`）、SAPI 辅助脚本（`speak.ps1`）与启动脚本。
+- `bridge/` —— Python 桥（`record_sink.py`）、音色复刻（`voice_clone.py`）、SAPI 辅助脚本（`speak.ps1`）与启动脚本。
 - `cordis.patch.yml` —— 安装器应用的 profile overlay 条目。
 - `scripts/` —— 清理与构建后校验脚本。
 
@@ -233,4 +248,4 @@ pnpm run check
 
 ## 许可证
 
-Apache License 2.0，详见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。项目衍生自 `dsh-voice-ai-girlfriend`（Apache-2.0），并改编了 HuggingFace speech-to-speech 与 `deepseek-harness` 的部分代码；运行时集成了 FunASR Paraformer（MIT）与基于 `edge-tts` 的微软 Edge TTS（LGPL-3.0）。原作者信息保留在 `NOTICE` 中。
+Apache License 2.0，详见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。项目衍生自 `dsh-voice-ai-girlfriend`（Apache-2.0），并改编了 HuggingFace speech-to-speech 与 `deepseek-harness` 的部分代码；运行时集成了 FunASR Paraformer（MIT）、基于 `edge-tts` 的微软 Edge TTS（LGPL-3.0），以及基于 `qwen-tts` 的 Qwen3-TTS 音色复刻（Apache-2.0）。原作者信息保留在 `NOTICE` 中。

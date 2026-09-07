@@ -5,3 +5,10 @@ numpy
 funasr
 modelscope
 edge-tts
+qwen-tts
+soundfile
+
+# torch / torchaudio are installed separately (CPU or CUDA wheels) by the
+# bridge start scripts, since the right wheel depends on your hardware.
+# qwen-tts needs transformers < 5; if pip installs 5.x, run:
+#   pip install "transformers<5"

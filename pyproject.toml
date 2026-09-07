@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dsh-chinese-talk-plus-bridge"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local speech bridge for the dsh-chinese-talk-plus DeepSeek Harness plugin"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,6 +16,8 @@ dependencies = [
   "funasr",
   "modelscope",
   "numpy",
+  "qwen-tts",
+  "soundfile",
   "uvicorn",
 ]
 

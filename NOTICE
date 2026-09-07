@@ -16,5 +16,7 @@ adapted from the project above.
 Runtime integrations:
   - FunASR Paraformer (ModelScope / FunASR, MIT)
   - Microsoft Edge TTS service through edge-tts (LGPL-3.0)
+  - Qwen3-TTS voice cloning through qwen-tts (Apache-2.0); model: Qwen/Qwen3-TTS-12Hz-1.7B-Base
+  - soundfile (BSD-3-Clause) for WAV writing
 
 SPDX-License-Identifier: Apache-2.0

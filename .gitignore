@@ -10,7 +10,7 @@ dist-*/
 
 # Local models (big, self-provisioned) & personal voice recordings
 models/
-voices/我的声音/
+voices/
 
 # Local runtime config (contains machine-specific model paths)
 bridge/bridge-config.json

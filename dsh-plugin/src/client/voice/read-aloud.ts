@@ -5,6 +5,7 @@
  * 不依赖浏览器 autoplay。
  */
 import { log } from './log-bus.ts'
+import { getCurrentVoice } from './voice-store.ts'
 
 const READ_KEY = 's2s.voice.read'
 const RECORD_SINK_KEY = 's2s.record.base'
@@ -52,6 +53,7 @@ export function cleanForSpeech(text: string): string {
 class ReadAloud {
   private _enabled: boolean
   private _speaking = false
+  private _synthesizing = false
   private listeners = new Set<() => void>()
   private pollTimer: ReturnType<typeof setInterval> | null = null
 
@@ -79,6 +81,11 @@ class ReadAloud {
 
   get reading(): boolean {
     return this._speaking
+  }
+
+  /** 本地复刻音色正在合成（服务端 phase=synthesizing）。 */
+  get synthesizing(): boolean {
+    return this._synthesizing
   }
 
   get enabled(): boolean {
@@ -112,7 +119,7 @@ class ReadAloud {
       const res = await fetch(`${sinkBase()}/api/speak`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: clean }),
+        body: JSON.stringify({ text: clean, voice: getCurrentVoice() }),
       })
       const data = (await res.json().catch(() => null)) as {
         ok?: boolean
@@ -140,6 +147,7 @@ class ReadAloud {
     this.stopPolling()
     if (this._speaking) {
       this._speaking = false
+      this._synthesizing = false
       this.emit()
       log('已停止朗读')
     }
@@ -150,13 +158,19 @@ class ReadAloud {
     this.pollTimer = setInterval(() => {
       void fetch(`${sinkBase()}/api/speech/status`)
         .then(r => r.json().catch(() => null))
-        .then((st: { speaking?: boolean; queue?: number; error?: string } | null) => {
+        .then((st: { speaking?: boolean; phase?: string; queue?: number; error?: string } | null) => {
           const speaking = st?.speaking === true
           const queue = typeof st?.queue === 'number' ? st.queue : 0
+          const synth = st?.phase === 'synthesizing'
+          if (this._synthesizing !== synth) {
+            this._synthesizing = synth
+            this.emit()
+          }
           if (!speaking && queue === 0 && this.pollTimer !== null) {
             this.stopPolling()
             if (this._speaking) {
               this._speaking = false
+              this._synthesizing = false
               this.emit()
               if (st?.error) {
                 log(`朗读失败：${st.error}`, true)

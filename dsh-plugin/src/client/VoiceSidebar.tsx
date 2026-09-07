@@ -6,11 +6,20 @@
  *  - 就绪后点一下麦克风进入「持续监听」，再点一下停止。
  *  - 音频以 20~40ms PCM 帧流式送给桥 /ws/asr；桥做 VAD，静音 3 秒切句识别。
  */
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState, type ChangeEvent } from 'react'
 import { bindLog } from './voice/log-bus.ts'
 import { reader } from './voice/read-aloud.ts'
 import { sendRecognizedText } from './voice/sender.ts'
 import { StreamingAsr } from './voice/streaming-asr.ts'
+import {
+  absoluteAudioUrl,
+  cloneVoice,
+  listVoices,
+  saveVoice,
+  synthesizePreview,
+  type SavedVoice,
+} from './voice/clone.ts'
+import { EDGE_VOICE, getCurrentVoice, setCurrentVoice } from './voice/voice-store.ts'
 import styles from './VoiceSidebar.module.css'
 
 const RECORD_SINK_KEY = 's2s.record.base'
@@ -129,8 +138,22 @@ export const VoiceSidebar = memo(function VoiceSidebar() {
   const [toast, setToast] = useState<string | null>(null)
   const [readOn, setReadOn] = useState<boolean>(reader.enabled)
   const [speaking, setSpeaking] = useState<boolean>(reader.reading)
+  const [synthesizing, setSynthesizing] = useState<boolean>(reader.synthesizing)
+  const [voices, setVoices] = useState<SavedVoice[]>([])
+  const [currentVoice, setCurrentVoiceState] = useState<string>(() => getCurrentVoice())
+  const [cloneBusy, setCloneBusy] = useState(false)
+  const [cloneVoiceId, setCloneVoiceId] = useState<string | null>(null)
+  const [refText, setRefText] = useState('')
+  const [previewText, setPreviewText] = useState('')
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [previewPlaying, setPreviewPlaying] = useState(false)
+  const [synthBusy, setSynthBusy] = useState(false)
+  const [saveName, setSaveName] = useState('')
+  const [saveBusy, setSaveBusy] = useState(false)
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const asrRef = useRef<StreamingAsr | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const fileRef = useRef<HTMLInputElement | null>(null)
 
   const pushLog = (msg: string, bad = false): void => {
     setLog(prev => [...prev.slice(-19), { t: clock(), msg, bad }])
@@ -158,7 +181,11 @@ export const VoiceSidebar = memo(function VoiceSidebar() {
   }, [])
 
   useEffect(() => {
-    const unsubReader = reader.subscribe(() => { setReadOn(reader.enabled); setSpeaking(reader.reading) })
+    const unsubReader = reader.subscribe(() => {
+      setReadOn(reader.enabled)
+      setSpeaking(reader.reading)
+      setSynthesizing(reader.synthesizing)
+    })
     bindLog((msg, bad = false) => pushLog(msg, bad))
     return () => { unsubReader(); bindLog(null) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -182,6 +209,13 @@ export const VoiceSidebar = memo(function VoiceSidebar() {
     void warm()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // 载入已保存的本地音色（供下拉切换）。
+  useEffect(() => {
+    let cancelled = false
+    void listVoices().then(vs => { if (!cancelled) setVoices(vs) })
+    return () => { cancelled = true }
   }, [])
 
   const showToast = (msg: string, durationMs = 2600): void => {
@@ -245,6 +279,99 @@ export const VoiceSidebar = memo(function VoiceSidebar() {
     asrRef.current?.setThresholdDb(v)
   }
 
+  // ── 音色复刻 ────────────────────────────────────────────────
+  const ensureAudio = (): HTMLAudioElement => {
+    if (audioRef.current === null) {
+      const a = new Audio()
+      a.onended = () => setPreviewPlaying(false)
+      a.onpause = () => setPreviewPlaying(false)
+      a.onplay = () => setPreviewPlaying(true)
+      audioRef.current = a
+    }
+    return audioRef.current
+  }
+
+  const doClone = async (file: File): Promise<void> => {
+    setCloneBusy(true)
+    pushLog('正在复刻音色…（首次需加载模型，请稍候）')
+    try {
+      const { voiceId, refText: rt } = await cloneVoice(file)
+      setCloneVoiceId(voiceId)
+      setRefText(rt)
+      setPreviewUrl(null)
+      setPreviewText('')
+      setSaveName('')
+      pushLog('复刻成功，可输入文本试听或保存音色')
+    } catch (err) {
+      pushLog('复刻失败：' + (err instanceof Error ? err.message : String(err)), true)
+    } finally {
+      setCloneBusy(false)
+    }
+  }
+
+  const onFileChosen = (e: ChangeEvent<HTMLInputElement>): void => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (file !== undefined) void doClone(file)
+  }
+
+  const synthesizeAndPlay = async (): Promise<void> => {
+    if (cloneVoiceId === null || previewText.trim() === '') {
+      pushLog('请先输入试听文本', true)
+      return
+    }
+    setSynthBusy(true)
+    try {
+      const { audioUrl } = await synthesizePreview(cloneVoiceId, previewText.trim())
+      setPreviewUrl(audioUrl)
+      const a = ensureAudio()
+      a.src = absoluteAudioUrl(audioUrl)
+      await a.play().catch(() => {})
+    } catch (err) {
+      pushLog('试听失败：' + (err instanceof Error ? err.message : String(err)), true)
+    } finally {
+      setSynthBusy(false)
+    }
+  }
+
+  const onPlayPreview = (): void => {
+    if (previewUrl === null) void synthesizeAndPlay()
+    else void audioRef.current?.play().catch(() => {})
+  }
+
+  const onPausePreview = (): void => { audioRef.current?.pause() }
+
+  const onRegenerate = (): void => { void synthesizeAndPlay() }
+
+  const onSaveVoice = async (): Promise<void> => {
+    if (cloneVoiceId === null || saveName.trim() === '') return
+    setSaveBusy(true)
+    try {
+      await saveVoice(cloneVoiceId, saveName.trim())
+      pushLog('音色已保存：' + saveName.trim())
+      const vs = await listVoices()
+      setVoices(vs)
+      const next = `clone:${cloneVoiceId}`
+      setCurrentVoiceState(next)
+      setCurrentVoice(next)
+    } catch (err) {
+      pushLog('保存失败：' + (err instanceof Error ? err.message : String(err)), true)
+    } finally {
+      setSaveBusy(false)
+    }
+  }
+
+  const onVoiceChange = (v: string): void => {
+    setCurrentVoiceState(v)
+    setCurrentVoice(v)
+    if (v === EDGE_VOICE) pushLog('朗读音色：微软晓晓（默认）')
+    else {
+      const vid = v.slice(6)
+      const found = voices.find(x => x.voice_id === vid)
+      pushLog('朗读音色：' + (found?.name ?? vid))
+    }
+  }
+
   const listening = phase === 'listening'
   const micClass = listening ? styles.micBtn + ' ' + styles.micOn : !sttReady ? styles.micBtn + ' ' + styles.micBusy : styles.micBtn
   const statusText = !sttReady ? '模型加载中…' : listening ? '持续监听中（静音 3 秒自动发送）' : phase === 'error' ? '出错了，见下方日志' : '点击开始持续监听'
@@ -304,6 +431,43 @@ export const VoiceSidebar = memo(function VoiceSidebar() {
             <div className={styles.thresholdHint}>低于该音量不开始录音</div>
           </div>
 
+          {/* 朗读音色切换（一次只允许一种音色） */}
+          <div className={styles.cloneSection}>
+            <div className={styles.cloneTitle}>朗读音色</div>
+            <select className={styles.select} value={currentVoice} onChange={e => onVoiceChange(e.target.value)}>
+              <option value={EDGE_VOICE}>微软晓晓（默认）</option>
+              {voices.map(v => (
+                <option key={v.voice_id} value={`clone:${v.voice_id}`}>{v.name}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* 音色复刻：上传 wav -> 试听/暂停/重新生成 -> 保存 */}
+          <div className={styles.cloneSection}>
+            <div className={styles.cloneTitle}>音色复刻</div>
+            <input ref={fileRef} type="file" accept="audio/*,.wav" className={styles.fileInput} onChange={onFileChosen} />
+            <button type="button" className={styles.ctrlBtn} disabled={cloneBusy} onClick={() => fileRef.current?.click()}>
+              {cloneBusy ? '⏳ 复刻中…' : '📁 上传 WAV 复刻'}
+            </button>
+            {cloneVoiceId !== null && (
+              <div className={styles.cloneInfo}>
+                <div className={styles.cloneRefText} title={refText}>{refText === '' ? '（参考文本未识别）' : '参考：' + refText}</div>
+                <input className={styles.textInput} value={previewText} placeholder="输入试听文本" onChange={e => setPreviewText(e.target.value)} />
+                <div className={styles.cloneBtns}>
+                  <button type="button" className={styles.ctrlBtn} disabled={synthBusy || previewText.trim() === ''} onClick={onPlayPreview}>
+                    {synthBusy ? '⏳ 合成中…' : '▶ 试听播放'}
+                  </button>
+                  <button type="button" className={styles.ctrlBtn} disabled={previewUrl === null} onClick={onPausePreview}>⏸ 试听暂停</button>
+                  <button type="button" className={styles.ctrlBtn} disabled={synthBusy || previewText.trim() === ''} onClick={onRegenerate}>🔄 重新生成</button>
+                </div>
+                <input className={styles.textInput} value={saveName} placeholder="音色名（保存后可选）" onChange={e => setSaveName(e.target.value)} />
+                <button type="button" className={styles.ctrlBtn + ' ' + styles.saveBtn} disabled={saveBusy || saveName.trim() === ''} onClick={onSaveVoice}>
+                  {saveBusy ? '⏳ 保存中…' : '💾 保存音色'}
+                </button>
+              </div>
+            )}
+          </div>
+
           {listening && (
             <div className={styles.partial} title="实时识别结果">
               {partial === '' ? '（正在听，实时文字会显示在这里）' : partial}
@@ -319,7 +483,9 @@ export const VoiceSidebar = memo(function VoiceSidebar() {
             >
               {readOn ? '🔊 朗读开' : '🔇 朗读关'}
             </button>
-            {speaking && <span className={styles.speaking}>📢 朗读中…</span>}
+            {synthesizing
+              ? <span className={styles.synthesizing}>⏳ 语音正在合成，请等待…</span>
+              : speaking && <span className={styles.speaking}>📢 朗读中…</span>}
           </div>
 
           <footer className={styles.footer}>

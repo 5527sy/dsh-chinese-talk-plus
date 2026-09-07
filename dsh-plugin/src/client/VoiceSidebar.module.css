@@ -279,6 +279,74 @@
   opacity: 0.95;
 }
 
+/* 音色复刻区 */
+.cloneSection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 2px;
+  border-top: 1px solid rgba(60, 60, 67, 0.08);
+}
+
+.cloneTitle {
+  font-size: 11px;
+  font-weight: 600;
+  color: #1c1c1e;
+  opacity: 0.75;
+}
+
+.select,
+.textInput {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 12px;
+  color: #1c1c1e;
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(60, 60, 67, 0.16);
+  border-radius: 10px;
+  padding: 6px 8px;
+  outline: none;
+}
+.select { cursor: pointer; }
+.textInput { font-family: inherit; }
+
+.fileInput {
+  display: none;
+}
+
+.cloneInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cloneBtns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cloneRefText {
+  font-size: 10px;
+  opacity: 0.6;
+  color: #1c1c1e;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.saveBtn {
+  border-color: rgba(46, 125, 50, 0.5);
+  background: rgba(46, 125, 50, 0.12);
+  color: #2e7d32;
+}
+
+.synthesizing {
+  font-size: 12px;
+  color: #b26a00;
+  font-weight: 600;
+}
+
 .toast {
   position: absolute;
   left: 10px;
@@ -321,4 +389,8 @@
   .ctrlBtn { background: rgba(255, 255, 255, 0.1); border-color: rgba(255, 255, 255, 0.18); color: #f2f2f7; }
   .ctrlBtn:hover { background: rgba(255, 255, 255, 0.16); }
   .ctrlOn { background: rgba(91, 124, 250, 0.24); color: #8fa6ff; border-color: rgba(91, 124, 250, 0.6); }
+  .cloneTitle, .cloneRefText { color: #f2f2f7; }
+  .select, .textInput { background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.18); color: #f2f2f7; }
+  .saveBtn { background: rgba(46, 125, 50, 0.22); color: #6fd67a; border-color: rgba(111, 214, 122, 0.5); }
+  .synthesizing { color: #f0b34a; }
 }

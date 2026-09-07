@@ -42,9 +42,12 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import soundfile as sf
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+
+from bridge import voice_clone
 
 RUNTIME_ROOT = Path.cwd()
 
@@ -131,6 +134,11 @@ def health() -> dict:
             "edge_tts": "ok" if _edge_command() is not None else "missing",
             "ffplay": "ok" if _resolve_ffplay() is not None else "missing",
             "sapi": "available" if os.name == "nt" else "unsupported",
+        },
+        "clone": {
+            "engine": "qwen3-tts-1.7b",
+            "state": voice_clone.model_state(),
+            "voices": len(voice_clone.list_voices()),
         },
     }
 
@@ -529,7 +537,7 @@ _SPEECH_THREAD_LOCK = threading.Lock()
 _SPEECH_STOP = threading.Event()
 _SPEECH_CURRENT = None  # 当前正在播放的 ffplay Popen
 _SPEECH_STATE_LOCK = threading.Lock()
-_SPEECH_STATE = {"speaking": False, "queue": 0}
+_SPEECH_STATE = {"speaking": False, "queue": 0, "phase": "idle"}  # idle | synthesizing | speaking
 _SPEECH_ERROR = ""
 
 
@@ -660,26 +668,61 @@ def _speak_edge_piece(text: str) -> None:
     raise RuntimeError(f"edge-tts 合成失败（3 次重试）: {last}")
 
 
+def _write_wav(path: Path, wav, sr: int) -> None:
+    """把 float32 波形写成 16bit PCM WAV（浏览器/ffplay 通用）。"""
+    data = np.clip(np.asarray(wav, dtype=np.float32), -1.0, 1.0)
+    sf.write(str(path), data, sr, subtype="PCM_16")
+
+
+def _speak_clone_piece(text: str, voice_id: str) -> None:
+    """本地复刻音色合成一段 wav -> ffplay 播放（合成期报 synthesizing）。"""
+    with _SPEECH_STATE_LOCK:
+        _SPEECH_STATE["phase"] = "synthesizing"
+    path = None
+    try:
+        wav, sr = voice_clone.synthesize(voice_id, text)
+        fd, path = _tempfile.mkstemp(suffix=".wav", prefix="dsh_clone_")
+        os.close(fd)
+        _write_wav(Path(path), wav, sr)
+        with _SPEECH_STATE_LOCK:
+            _SPEECH_STATE["phase"] = "speaking"
+        _play_file_wait(Path(path))
+    finally:
+        if path is not None:
+            try:
+                os.unlink(path)
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def _speech_worker() -> None:
     global _SPEECH_CURRENT, _SPEECH_ERROR  # noqa: PLW0603
     while True:
-        text = _SPEECH_QUEUE.get()
-        if text is None:
+        item = _SPEECH_QUEUE.get()
+        if item is None:
             return
+        if isinstance(item, tuple):
+            text, voice = item
+        else:
+            text, voice = item, None
         with _SPEECH_STATE_LOCK:
             _SPEECH_STATE["speaking"] = True
+            _SPEECH_STATE["phase"] = "speaking"
             _SPEECH_STATE["queue"] = max(0, _SPEECH_QUEUE.qsize())
         try:
             for piece in _split_speech(text, max_len=280, min_pause=50):
                 if _SPEECH_STOP.is_set():
                     break
-                try:
-                    _speak_edge_piece(piece)  # 在线晓晓（重试）
-                except Exception as edge_err:  # noqa: BLE001
-                    print(f"[record-sink] edge 失败，回退本机离线语音: {edge_err}", flush=True)
-                    if _SPEECH_STOP.is_set():
-                        break
-                    _speak_sapi_piece(piece)   # 本机 Huihui 离线兜底
+                if voice and voice.startswith("clone:"):
+                    _speak_clone_piece(piece, voice[len("clone:"):])
+                else:
+                    try:
+                        _speak_edge_piece(piece)  # 在线晓晓（重试）
+                    except Exception as edge_err:  # noqa: BLE001
+                        print(f"[record-sink] edge 失败，回退本机离线语音: {edge_err}", flush=True)
+                        if _SPEECH_STOP.is_set():
+                            break
+                        _speak_sapi_piece(piece)   # 本机 Huihui 离线兜底
         except Exception as err:  # noqa: BLE001
             print(f"[record-sink] speak error: {err}", flush=True)
             with _SPEECH_STATE_LOCK:
@@ -687,6 +730,7 @@ def _speech_worker() -> None:
         finally:
             with _SPEECH_STATE_LOCK:
                 _SPEECH_STATE["speaking"] = False
+                _SPEECH_STATE["phase"] = "idle"
                 _SPEECH_STATE["queue"] = max(0, _SPEECH_QUEUE.qsize())
 
 
@@ -711,7 +755,7 @@ def _ensure_speech_worker() -> None:
 
 @app.post("/api/speak")
 async def speak(request: Request) -> JSONResponse:
-    """整段文本入队朗读（Edge TTS 优先，Windows SAPI 兜底，串行播放）。"""
+    """整段文本入队朗读（默认 Edge TTS，voice=clone:<id> 切本地复刻音色，串行播放）。"""
     global _SPEECH_ERROR  # noqa: PLW0603
     try:
         payload = await request.json()
@@ -720,6 +764,11 @@ async def speak(request: Request) -> JSONResponse:
     text = _sanitize_tts_text(str(payload.get("text") or ""))
     if not text:
         return JSONResponse({"ok": False, "error": "empty text"}, status_code=400)
+    voice = str(payload.get("voice") or "").strip() or "edge"
+    if voice.startswith("clone:"):
+        voice_id = voice[len("clone:"):]
+        if voice_clone.ensure_voice(voice_id) is None:
+            return JSONResponse({"ok": False, "error": f"音色不存在: {voice_id}"}, status_code=404)
     if _resolve_ffplay() is None:
         return JSONResponse({"ok": False, "error": "ffplay 不可用，请安装 ffmpeg 或设置 FFPLAY_BIN"}, status_code=500)
     try:
@@ -727,10 +776,10 @@ async def speak(request: Request) -> JSONResponse:
         with _SPEECH_STATE_LOCK:
             _SPEECH_ERROR = ""
         _SPEECH_STOP.clear()
-        _SPEECH_QUEUE.put(text)
+        _SPEECH_QUEUE.put((text, voice))
         with _SPEECH_STATE_LOCK:
             queue_len = _SPEECH_QUEUE.qsize() + (1 if _SPEECH_STATE["speaking"] else 0)
-        return JSONResponse({"ok": True, "queue": queue_len, "chars": len(text)})
+        return JSONResponse({"ok": True, "queue": queue_len, "chars": len(text), "voice": voice})
     except Exception as err:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": f"speak failed: {err}"}, status_code=500)
 
@@ -761,9 +810,142 @@ def speech_status() -> dict:
     with _SPEECH_STATE_LOCK:
         return {
             "speaking": _SPEECH_STATE["speaking"],
+            "phase": _SPEECH_STATE["phase"],
             "queue": _SPEECH_STATE["queue"],
             "error": _SPEECH_ERROR,
         }
+
+
+# ─────────────────────── 音色复刻：Qwen3-TTS (V3) ──────────────────────────────
+PREVIEW_DIR = RUNTIME_ROOT / "vocal" / "preview"
+VOICE_TMP = RUNTIME_ROOT / "voices" / ".tmp"
+
+
+def _do_clone(body: bytes, content_type: str, manual: str) -> dict:
+    """同步：上传音频转 24k WAV -> FunASR 转写 -> 抽取音色，返回 {voice_id, ref_text}。"""
+    if FFMPEG is None:
+        raise RuntimeError("ffmpeg not found — set FFMPEG_BIN")
+    VOICE_TMP.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex[:12]
+    src_ext = EXT_BY_TYPE.get(content_type, ".bin")
+    src = VOICE_TMP / f"_ref_{token}{src_ext}"
+    ref_path = VOICE_TMP / f"ref_{token}.wav"
+    src.write_bytes(body)
+    registered = False
+    try:
+        proc = subprocess.run(
+            [str(FFMPEG), "-y", "-i", str(src), "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le", str(ref_path)],
+            capture_output=True, timeout=120,
+        )
+        if proc.returncode != 0:
+            tail = (proc.stderr or b"").decode("utf-8", "ignore")[-300:]
+            raise RuntimeError(f"ffmpeg 转 WAV 失败: {tail}")
+
+        if manual:
+            ref_text = manual
+        else:
+            result = _run_stt(ref_path.read_bytes(), "audio/wav", 0)
+            ref_text = (result.get("text") or "").strip()
+        if not ref_text:
+            raise RuntimeError("参考音频转写失败，请用 X-Ref-Text 头提供参考文本")
+
+        voice_id = voice_clone.register_voice(str(ref_path), ref_text)
+        registered = True
+        return {"voice_id": voice_id, "ref_text": ref_text}
+    finally:
+        try:
+            src.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+        if not registered:
+            try:
+                ref_path.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+@app.post("/api/voice/clone")
+async def voice_clone_upload(request: Request) -> JSONResponse:
+    """上传参考音频 -> 复刻音色，返回 { voice_id, ref_text }。参考文本可用 X-Ref-Text 头提供。"""
+    body = await request.body()
+    if len(body) < 256:
+        return JSONResponse({"ok": False, "error": "empty or too-small payload"}, status_code=400)
+    content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    manual = (request.headers.get("x-ref-text") or "").strip()
+    try:
+        result = await asyncio.to_thread(_do_clone, body, content_type, manual)
+        return JSONResponse({"ok": True, **result})
+    except Exception as err:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": f"复刻失败: {err}"}, status_code=500)
+
+
+@app.post("/api/voice/synthesize")
+async def voice_synthesize(request: Request) -> JSONResponse:
+    """用复刻音色合成一段试听音频，返回可播放 URL。"""
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": "bad json"}, status_code=400)
+    voice_id = str(payload.get("voice_id") or "")
+    text = _sanitize_tts_text(str(payload.get("text") or ""))
+    language = str(payload.get("language") or "Auto")
+    if not voice_id or not text:
+        return JSONResponse({"ok": False, "error": "voice_id/text 必填"}, status_code=400)
+    try:
+        wav, sr = await asyncio.to_thread(voice_clone.synthesize, voice_id, text, language)
+    except Exception as err:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": f"合成失败: {err}"}, status_code=500)
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex[:12]
+    out = PREVIEW_DIR / f"{token}.wav"
+    try:
+        _write_wav(out, wav, sr)
+    except Exception as err:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": f"写音频失败: {err}"}, status_code=500)
+    return JSONResponse({
+        "ok": True,
+        "audio_url": f"/api/voice/audio/{token}",
+        "seconds": round(len(wav) / sr, 2),
+    })
+
+
+@app.get("/api/voice/audio/{token}")
+def voice_audio(token: str):
+    if not re.fullmatch(r"[0-9a-f]{12}", token):
+        return JSONResponse({"ok": False, "error": "bad token"}, status_code=400)
+    path = PREVIEW_DIR / f"{token}.wav"
+    if not path.is_file():
+        return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+    return FileResponse(path, media_type="audio/wav")
+
+
+@app.post("/api/voice/save")
+async def voice_save(request: Request) -> JSONResponse:
+    """保存内存态音色到 voices/cloned/<id>/（ref.wav + meta.json）。"""
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": "bad json"}, status_code=400)
+    voice_id = str(payload.get("voice_id") or "")
+    name = str(payload.get("name") or "").strip()
+    if not voice_id or not name:
+        return JSONResponse({"ok": False, "error": "voice_id/name 必填"}, status_code=400)
+    try:
+        meta = await asyncio.to_thread(voice_clone.save_voice, voice_id, name)
+    except Exception as err:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": f"保存失败: {err}"}, status_code=500)
+    return JSONResponse({"ok": True, "voice": meta})
+
+
+@app.get("/api/voices")
+def list_voices() -> JSONResponse:
+    return JSONResponse({"ok": True, "voices": voice_clone.list_voices()})
+
+
+@app.delete("/api/voice/{voice_id}")
+def delete_voice(voice_id: str) -> JSONResponse:
+    ok = voice_clone.delete_voice(voice_id)
+    return JSONResponse({"ok": ok})
 
 
 def main() -> None:

@@ -7,6 +7,7 @@
  */
 export interface StreamingCallbacks {
   base: string
+  initialThresholdDb?: number
   onReady?: () => void
   onPartial?: (text: string) => void
   onFinal?: (text: string) => void
@@ -20,11 +21,21 @@ export class StreamingAsr {
   private source: MediaStreamAudioSourceNode | null = null
   private stream: MediaStream | null = null
   private active = false
+  private thresholdDb: number
 
-  constructor(private readonly cb: StreamingCallbacks) {}
+  constructor(private readonly cb: StreamingCallbacks) {
+    this.thresholdDb = typeof cb.initialThresholdDb === 'number' ? cb.initialThresholdDb : -40
+  }
 
   get isActive(): boolean {
     return this.active
+  }
+
+  setThresholdDb(db: number): void {
+    this.thresholdDb = db
+    if (this.ws !== null && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'vad', threshold_db: db }))
+    }
   }
 
   async start(): Promise<void> {
@@ -50,7 +61,10 @@ export class StreamingAsr {
     const ws = new WebSocket(wsUrl)
     this.ws = ws
     ws.binaryType = 'arraybuffer'
-    ws.onopen = () => this.cb.onReady?.()
+    ws.onopen = () => {
+      this.cb.onReady?.()
+      this.setThresholdDb(this.thresholdDb)
+    }
     ws.onmessage = (ev: MessageEvent): void => {
       let data: { type?: string; text?: string; error?: string } | null = null
       try { data = JSON.parse(String(ev.data)) } catch { return }

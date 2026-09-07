@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -36,6 +37,7 @@ import sys
 import threading
 import time
 import uuid
+import math
 from pathlib import Path
 from typing import Optional
 
@@ -422,6 +424,7 @@ async def ws_asr(ws: WebSocket) -> None:
         return
     await ws.send_json({"type": "ready"})
 
+    vad_threshold_db = -40.0  # RMS dB：低于此值不认为在说话（前端滑块可调）
     accum = bytearray()
     speaking = False
     silent_since: Optional[float] = None
@@ -471,8 +474,16 @@ async def ws_asr(ws: WebSocket) -> None:
             if msg.get("bytes"):
                 frame = msg["bytes"]
             elif msg.get("text"):
-                if (msg["text"] or "").strip().lower() == "stop":
+                txt = (msg["text"] or "").strip()
+                if txt.lower() == "stop":
                     break
+                try:
+                    cfg = json.loads(txt)
+                    if isinstance(cfg, dict) and cfg.get("type") == "vad" and isinstance(cfg.get("threshold_db"), (int, float)):
+                        vad_threshold_db = float(cfg["threshold_db"])
+                        await ws.send_json({"type": "vad", "threshold_db": vad_threshold_db})
+                except Exception:
+                    pass
                 continue
             else:
                 continue
@@ -481,9 +492,10 @@ async def ws_asr(ws: WebSocket) -> None:
             if samples.size == 0:
                 continue
             rms = float(np.sqrt(float(np.mean((samples.astype(np.float32) / 32768.0) ** 2))))
+            rms_db = 20.0 * math.log10(max(rms, 1e-6))
             now = time.monotonic()
 
-            if rms >= 0.01:
+            if rms_db >= vad_threshold_db:
                 if not speaking:
                     speaking = True
                     accum.clear()

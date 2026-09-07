@@ -253,8 +253,9 @@ function applyImpl(ctx: Context): void {
 
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay',
-    id: 'chinese-talk-plus',
+    id: 'voice-call',
     order: 20,
+    priority: -1, // shadow 官方 @deepseek-ai/dsh-client-ui-voice-call 的同名面板
     locale: NS,
   }, VoiceSidebar))
 

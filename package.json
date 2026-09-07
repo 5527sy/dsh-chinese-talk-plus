@@ -1,6 +1,6 @@
 {
   "name": "dsh-chinese-talk-plus",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Installable DeepSeek Harness Web bundle for Chinese speech input, local transcription, answer archiving, and reply read-aloud",
   "keywords": [
     "deepseek-harness",

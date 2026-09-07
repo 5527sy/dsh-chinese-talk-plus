@@ -1,0 +1,20 @@
+dsh-chinese-talk-plus
+Copyright (c) 2026 dsh-chinese-talk-plus authors
+
+This project is a derivative of:
+
+  dsh-voice-ai-girlfriend
+  https://github.com/beiyege-01/dsh-voice-ai-girlfriend
+  Copyright (c) beiyege-01
+  Licensed under the Apache License, Version 2.0
+  https://www.apache.org/licenses/LICENSE-2.0
+
+Portions are based on HuggingFace speech-to-speech (Apache-2.0) and
+deepseek-harness (MIT). The bridge and browser plugin sources include code
+adapted from the project above.
+
+Runtime integrations:
+  - FunASR Paraformer (ModelScope / FunASR, MIT)
+  - Microsoft Edge TTS service through edge-tts (LGPL-3.0)
+
+SPDX-License-Identifier: Apache-2.0

@@ -1,0 +1,7 @@
+# Local bridge dependencies. FunASR installs its own ML runtime dependencies.
+fastapi
+uvicorn
+numpy
+funasr
+modelscope
+edge-tts
